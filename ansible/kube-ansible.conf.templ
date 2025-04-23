@@ -1,0 +1,78 @@
+{
+    "general_settings": {
+        "ssh_username": "username",
+        "ansible_user": "username",
+        "ansible_group": "groupname",
+        "default_gateway_addr": "192.168.0.1",
+        "dns_server_addr": "192.168.0.1",
+        "master_server_addr": "192.168.100.2",
+        "master_server_port": "6443",
+        "do_reset_kube_env": "false",
+        "cni_name": "calico | flannel",
+        "flannel_version": "v0.25.2",
+        "calico_version": "v3.27.0",
+        "domain_name": "inhouse.local",
+        "pv_mount_path": "kubedata"
+    },
+    "extra_pkginfo": {
+        "arch_name": "arm64",
+        "os_name": "linux",
+        "helm_version": "v3.17.3",
+        "golang_version": "1.22.4",
+        "golang_archname": "armv6l",
+        "containerd_version": "2.0.5",
+        "runc_version": "v1.2.6",
+        "cni_plugin_version": "v1.6.2",
+        "helm_dlurl": "https://get.helm.sh/helm-%%helm_version%%-%%os_name%%-%%arch_name%%.tar.gz",
+        "golang_dlurl": "https://go.dev/dl/go%%golang_version%%.%%os_name%%-%%arch_name%%.tar.gz",
+        "containerd_dlurl": "https://github.com/containerd/containerd/releases/download/v%%containerd_version%%/containerd-%%containerd_version%%-%%os_name%%-%%arch_name%%.tar.gz",
+        "runc_dlurl": "https://github.com/opencontainers/runc/releases/download/%%runc_version%%/runc.%%arch_name%%",
+        "cni_plugin_dlurl": "https://github.com/containernetworking/plugins/releases/download/%%cni_plugin_version%%/cni-plugins-%%os_name%%-%%arch_name%%-%%cni_plugin_version%%.tgz"
+    },
+    "master_node": {
+        "hostname": "kubemst",
+        "address": "240f:79:b193:1:2f0f:c90d:2147:4a38",
+        "ssh_pkey_filename": "kubemst.key",
+        "fixed_ipv4_addr": "192.168.100.2",
+        "fixed_ipv4_netmasklen": "24"
+    },
+    "worker_node": [
+        {
+            "hostname": "kube1",
+            "address": "240f:79:b193:1:549a:3d19:4416:deb6",
+            "ssh_pkey_filename": "kube1.key",
+            "fixed_ipv4_addr": "192.168.100.129",
+            "fixed_ipv4_netmasklen": "24"
+        },
+        {
+            "hostname": "kube2",
+            "address": "240f:79:b193:1:702a:79ac:44cb:3d27",
+            "ssh_pkey_filename": "kube2.key",
+            "fixed_ipv4_addr": "192.168.100.130",
+            "fixed_ipv4_netmasklen": "24"
+        }
+    ],
+    "nfssvr_node": {
+        "hostname": "kubestorage",
+        "address": "240f:79:b193:1:a75a:ef3:30ae:f444",
+        "ssh_pkey_filename": "kubestorage.key",
+        "fixed_ipv4_addr": "192.168.100.65",
+        "fixed_ipv4_netmasklen": "24",
+        "namespace": "nfs-provisioner",
+        "kube_mount_pathname": "kubedata",
+        "exported_dirname_list": [
+            {
+                "exported_pathname": "export",
+                "provisioner_name": "nfs-storage1",
+                "reclaim_policy": "Delete",
+                "storage_class_name": "nfs1"
+            },
+            {
+                "exported_pathname": "export2",
+                "provisioner_name": "nfs-storage2",
+                "reclaim_policy": "Delete",
+                "storage_class_name": "nfs2"
+            }
+        ]
+    }
+}
