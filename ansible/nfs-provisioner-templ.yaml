@@ -1,0 +1,9 @@
+nfs:
+  server: %%nfs_server_hostname%%
+  path: /%%nfs_server_exportfs_name%%
+  replicaCount: 2
+
+storageClass:
+  name: %%provisioner_name%%-storage-class
+  provisionerName: %%provisioner_name%%
+  reclaimPolicy: %%reclaim_policy%%

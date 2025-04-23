@@ -1,0 +1,450 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: Adds permission of sudoer for {{ ansible_user }}
+      shell: |
+        ANSIBLE_SUDOERS="/etc/sudoers.d/010_pi-nopasswd"
+        if [ -f ${ANSIBLE_SUDOERS} ]
+        then
+          grep {{ ansible_user }} ${ANSIBLE_SUDOERS} 1> /dev/null 2> /dev/null
+          if [ $? -eq 0 ]
+          then
+            exit 0
+          fi
+        fi
+        echo "{{ ansible_user }} ALL=(ALL) NOPASSWD: ALL" >> ${ANSIBLE_SUDOERS}
+        exit 0
+
+    - name: Install necessary packages
+      apt:
+        update_cache: yes
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - netplan.io
+          - net-tools
+          - rsyslog
+          - make
+          - build-essential
+          - libssl-dev
+          - zlib1g-dev
+          - libbz2-dev
+          - libreadline-dev
+          - libsqlite3-dev
+          - libgdbm-dev
+          - libgdbm-compat-dev
+          - libdb-dev
+          - wget
+          - curl
+          - llvm
+          - libncurses5-dev
+          - libncursesw5-dev
+          - xz-utils
+          - tk-dev
+          - libffi-dev
+          - liblzma-dev
+          - python3-openssl
+          - python3-kubernetes
+          - git
+          - jq
+
+    - name: Add Docker repository GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/docker.gpg
+      args:
+        creates: /etc/apt/trusted.gpg.d/docker.gpg
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: deb [arch=arm64] https://download.docker.com/linux/debian {{ ansible_lsb.codename }} stable
+        state: present
+
+    - name: Add Kubernetes repository GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/trusted.gpg.d/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes repository
+      ansible.builtin.apt_repository:
+        repo: deb [signed-by=/etc/apt/trusted.gpg.d/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /
+        state: present
+
+    - name: Store Kubernetes initializer scripts
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+      loop:
+        - { src: "tools/kubeReset.sh",    dest: "{{ store_directory }}/kubeReset.sh" }
+        - { src: "tools/kubemstSetup.sh", dest: "{{ store_directory }}/kubemstSetup.sh" }
+        - { src: "tools/kubewkSetup.sh",  dest: "{{ store_directory }}/kubewkSetup.sh" }
+
+    - name: Append boot option
+      shell: |
+        BOOT_CMDLINE_FILE="/boot/firmware/cmdline.txt"
+        grep cgroup_enable ${BOOT_CMDLINE_FILE} 1> /dev/null 2> /dev/null
+        if [ $? -ne 0 ]
+        then
+          echo -n " cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory systemd.unified_cgroup_hierarchy=0" >> ${BOOT_CMDLINE_FILE}
+        fi
+        exit 0
+
+    - name: Load overlay kernel module
+      modprobe:
+        name: overlay
+        state: present
+
+    - name: Load br_netfilter kernel module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Configure load modules permanently
+      shell: |
+        K8S_MODLOAD_CONF="/etc/modules-load.d/k8s.conf"
+        if [ -f ${K8S_MODLOAD_CONF} ]; then
+          rm -f ${K8S_MODLOAD_CONF}
+        fi
+        echo "overlay" > ${K8S_MODLOAD_CONF}
+        echo "br_netfilter" >> ${K8S_MODLOAD_CONF}
+        modprobe overlay
+        modprobe br_netfilter
+        K8S_SYSCTL_CONF="/etc/sysctl.d/k8s.conf"
+        echo "net.bridge.bridge-nf-call-iptables  = 1" > ${K8S_SYSCTL_CONF}
+        echo "net.bridge.bridge-nf-call-ip6tables = 1" > ${K8S_SYSCTL_CONF}
+        echo "net.ipv4.ip_forward                 = 1" > ${K8S_SYSCTL_CONF}
+
+    - name: Ensure /proc/sys/net/bridge/bridge-nf-call-iptables is set to 1
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: 1
+        state: present
+
+    - name: Ensure /proc/sys/net/bridge/bridge-nf-call-ip6tables is set to 1
+      sysctl:
+        name: net.bridge.bridge-nf-call-ip6tables
+        value: 1
+        state: present
+
+    - name: Create mount path directory for PV
+      shell: |
+        PKG_STORE_DIR="/home/{{ ansible_user }}/{{ kube_pkgdirname }}"
+        if [ ! -d ${PKG_STORE_DIR} ]; then
+          mkdir -p ${PKG_STORE_DIR}
+        fi
+        chown {{ ansible_user }}:{{ ansible_group }} ${PKG_STORE_DIR}
+
+    - name: Copy extra packages for kubernetes environment
+      become: no
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+      loop:
+        - { src: "{{ helm_pkgfile }}",      dest: "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/helm.tgz" }
+        - { src: "{{ golang_pkgfile }}",      dest: "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/golang.tgz" }
+        - { src: "{{ containerd_pkgfile }}",  dest: "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/containerd.tgz" }
+        - { src: "{{ runc_pkgfile }}",        dest: "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/runc" }
+        - { src: "{{ cni_plugins_pkgfile }}", dest: "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/cni_plugins.tgz" }
+
+    - name: Configure static IP with Netplan
+      copy:
+        dest: /etc/netplan/80-netcfg.yaml
+        content: |
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              eth0:
+                addresses:
+                  - {{ net_ip }}/{{ netmask }}
+                nameservers:
+                  addresses: [{{ dns_server }}]
+                dhcp4: false
+                dhcp6: true
+        mode: '0600'
+        owner: root
+
+    - name: Apply Netplan configuration
+      shell: |
+        sudo netplan apply
+        if [ $? -ne 0 ]
+        then
+          echo "Failed to apply netplan"
+          exit 1
+        fi
+        echo "Complete to apply netplan"
+        exit 0
+
+    - name: Disable swap
+      command: swapoff -a
+
+    - name: Set CONF_SWAPSIZE to 0
+      lineinfile:
+        path: /etc/dphys-swapfile
+        regexp: '^CONF_SWAPSIZE='
+        line: 'CONF_SWAPSIZE=0'
+        state: present
+    
+    - name: Ensure swap is turned off
+      command: dphys-swapfile swapoff
+      ignore_errors: yes
+
+    - name: Remove the swap file
+      file:
+        path: /var/swap
+        state: absent
+
+    - name: Stop dphys-swapfile service
+      systemd:
+        name: dphys-swapfile
+        state: stopped
+        enabled: no
+
+    - name: Keep swap disabled after reboot
+      mount:
+        name: none
+        opts: sw
+        state: absent
+
+    - name: Create mount path directory for PV
+      shell: |
+        if [ ! -d /{{ pv_mount_path }} ]; then
+          mkdir -p /{{ pv_mount_path }}
+        fi
+
+  handlers:
+    - name: Restart networking
+      ansible.builtin.service:
+        name: networking
+        state: restarted
+
+- hosts: all
+  become: yes
+  name: -- System restart procedures --
+  tasks:
+    - name: Do system reboot
+      reboot:
+        reboot_timeout: 600
+        msg: "Reboot initiated by Ansible"
+
+    - name: Wait for 30 seconds
+      wait_for:
+        timeout: 30
+
+- hosts: all
+  become: yes
+  name: -- Reset kubernetes environment if required --
+  tasks:
+    - name: Do reset kubernetes environment
+      shell: |
+        bash {{ store_directory }}/kubeReset.sh
+      register: kubeadm_init_result
+      when: reset_kube_env | bool
+
+    - name: Install containerd packages
+      apt:
+        update_cache: yes
+        name:
+          - containerd
+
+    - name: Install docker-ce packages
+      apt:
+        update_cache: yes
+        name:
+          - docker-ce
+
+    - name: Install podman packages
+      apt:
+        update_cache: yes
+        name:
+          - podman
+
+    - name: Create containerd configuration directory
+      shell: |
+        CONTAINERD_CONFIGFILE="/etc/containerd/config.toml"
+        TEMP_CONTAINERD_CONFIGFILE="/tmp/containerd_config.toml"
+        if [ ! -d /etc/containerd ]
+        then
+          mkdir -p /etc/containerd
+        elif [ -f ${CONTAINERD_CONFIGFILE} ]
+        then
+          mv ${CONTAINERD_CONFIGFILE} ${CONTAINERD_CONFIGFILE}.bak
+        fi
+        containerd config default > ${TEMP_CONTINERD_CONFIGFILE}
+        grep 'sandbox_image = "registry.k8s.io/pause:3.10"' ${TEMP_CONTAINERD_CONFIGFILE} 1> /dev/null 2> /dev/null
+        if [ $? -ne 0 ]
+        then
+          # No sandbox image setting
+          echo >> ${TEMP_CONTAINERD_CONFIGFILE}   # Adds blank line
+          echo '  [plugins.'io.containerd.grpc.v1.cri']' >> ${TEMP_CONTAINERD_CONFIGFILE}
+          echo '    sandbox_image = "registry.k8s.io/pause:3.10"' >> ${TEMP_CONTAINERD_CONFIGFILE}
+        fi
+        sudo mv ${TEMP_CONTAINERD_CONFIGFILE} ${CONTAINERD_CONFIGFILE}
+
+    - name: Install Kubernetes components and containerd package
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+
+    - name: Set resolvConf in kubelet config.yaml
+      lineinfile:
+        path: /var/lib/kubelet/config.yaml
+        line: "resolvConf: /etc/resolv.conf"
+        create: yes
+        mode: '0644'
+
+    - name: Wait for 30 seconds after resetting kubernetes environment if required
+      wait_for:
+        timeout: 30
+      when: reset_kube_env | bool 
+
+- hosts: all
+  become: yes
+  name: -- Installs extra packages for kubernetes environment --
+  tasks:
+    - name: Installs helm packages
+      shell: |
+        tar Cxzvf "/home/{{ ansible_user }}/{{ kube_pkgdirname }}" "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/helm.tgz"
+        sudo mv "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/linux-arm64/helm" /usr/local/bin/helm
+
+    - name: Installs golang packages
+      shell: |
+        sudo tar Cxzvf /usr/local "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/golang.tgz"
+        grep 'export PATH=$PATH:/usr/local/go/bin' {{ kube_bashrc }} 1> /dev/null 2> /dev/null
+        if [ ! -f {{ kube_bashrc }} ] || [ $? -ne 0 ]
+        then
+          echo 'export PATH=$PATH:/usr/local/go/bin' >> {{ kube_bashrc }}
+        fi
+
+    - name: Installs containerd packages
+      shell: |
+        sudo tar Cxzvf /usr "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/containerd.tgz"
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now containerd
+
+    - name: Installs runc packages
+      shell: |
+        sudo install -m 755 "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/runc" /usr/local/sbin/runc
+
+    - name: Installs cni-plugins packages
+      shell: |
+        sudo mkdir -p /opt/cni/bin
+        sudo tar Cxzvf /opt/cni/bin "/home/{{ ansible_user }}/{{ kube_pkgdirname }}/cni_plugins.tgz"
+
+    - name: Enabling kubelet
+      shell: |
+        sudo systemctl enable --now kubelet
+
+- hosts: master
+  name: -- Builds up kubernetes environment as Master node --
+  become: yes
+  tasks:
+    - name: Execute Kubernetes initializer for Master node
+      become: no
+      shell: |
+        bash {{ store_directory }}/kubemstSetup.sh --apisvr {{ kube_master_node_addr }} --apisvr-port {{ kube_master_server_port }}
+      register: kubeadm_init_result
+#      ignore_errors: yes
+
+    - name: Obtains kubernetes parameter file
+      become: no
+      fetch:
+        src: "{{ kube_config }}"
+        dest: "local_tmp/kubemst.conf"
+        flat: yes
+
+    - name: Copy kubeconfig
+      shell: |
+        mkdir -p /home/{{ ansible_user }}/.kube
+        chown {{ ansible_user }}:{{ ansible_group }} /home/{{ ansible_user }}/.kube
+        sudo cp /etc/kubernetes/admin.conf /home/{{ ansible_user }}/.kube/config
+        chown {{ ansible_user }}:{{ ansible_group }} /home/{{ ansible_user }}/.kube/config
+      when: kubeadm_init_result is succeeded
+
+    - name: Wait for 30 seconds
+      wait_for:
+        timeout: 10
+
+- hosts: workers
+  name: -- Builds up kubernetes environment as Worker node --
+  become: no
+  vars_files:
+    - k8s_tokens.yml
+  tasks:
+    - name: Create .kube/kube-token directory on worker node
+      become: yes
+      shell: |
+        KUBE_CONFDIR="/home/{{ ansible_user }}/.kube"
+        KUBE_TOKENFILE_DIR="${KUBE_CONFDIR}/kube-token"
+        if [ ! -d ${KUBE_TOKENFILE_DIR} ]
+        then
+          mkdir -p ${KUBE_TOKENFILE_DIR}
+        fi
+        sudo chown -R {{ ansible_user }}:{{ ansible_group }} ${KUBE_CONFDIR}
+        exit 0
+
+    - name: Store Master node parameters
+      copy:
+        src: "local_tmp/kubemst.conf"
+        dest: "{{ kube_config }}"
+
+    - name: Execute Kubernetes initializer for Worker node
+      shell: |
+        bash {{ store_directory }}/kubewkSetup.sh --kubemst-conf {{ kube_config }}
+      register: kubeadm_init_result
+#      ignore_errors: yes
+
+- hosts: all
+  become: yes
+  name: -- Create directories for Kubernetes environment --
+  tasks:
+    - name: Create mount path directory for kubernetes handling folder
+      shell: |
+        if [ ! -d /etc/kubernetes/manifests ]; then
+          mkdir -p /etc/kubernetes/manifests
+        fi
+
+- hosts: master
+  name: -- Builds up CNI environment --
+  become: yes
+  tasks:
+    - name: Install Flannel CNI
+      command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/{{ flannel_version }}/Documentation/kube-flannel.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when:
+        - kubeadm_init_result is succeeded
+        - cni_name == "flannel"
+
+    - name: Install Calico Operator
+      command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when:
+        - kubeadm_init_result is succeeded
+        - cni_name == "calico"
+
+    - name: Wait for 30 seconds
+      wait_for:
+        timeout: 10
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when:
+        - kubeadm_init_result is succeeded
+
+- hosts: all
+  name: -- Enable Kubernetes and Docker services --
+  become: yes
+  tasks:
+    - name: Ensure kubelet service is enabled
+      ansible.builtin.systemd:
+        name: kubelet
+        enabled: yes
+        state: started
